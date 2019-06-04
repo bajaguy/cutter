@@ -5,18 +5,21 @@
 #ifndef DESCRIPTIONS_H
 #define DESCRIPTIONS_H
 
+#include <QString>
+#include <QList>
+#include <QStringList>
+#include <QMetaType>
+#include "core/CutterCommon.h"
+
 struct FunctionDescription {
     RVA offset;
     RVA size;
     RVA nargs;
     RVA nbbs;
     RVA nlocals;
-    RVA cc;
     QString calltype;
     QString name;
     RVA edges;
-    RVA cost;
-    RVA calls;
     RVA stackframe;
 
     bool contains(RVA addr) const
@@ -120,7 +123,7 @@ struct SectionDescription {
     RVA size;
     RVA vsize;
     QString name;
-    QString flags;
+    QString perm;
     QString entropy;
 };
 
@@ -162,6 +165,7 @@ struct RIOPluginDescription {
     QString description;
     QString license;
     QString permissions;
+    QList<QString> uris;
 };
 
 struct RCorePluginDescription {

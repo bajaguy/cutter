@@ -10,6 +10,7 @@
 #include "common/R2Task.h"
 #include "common/Json.h"
 #include "core/Cutter.h"
+#include "r_asm.h"
 #include "sdb.h"
 
 Q_GLOBAL_STATIC(CutterCore, uniqueInstance)
@@ -226,7 +227,7 @@ QString CutterCore::sdbGet(QString path, QString key)
         if (val && *val)
             return val;
     }
-    return QString("");
+    return QString();
 }
 
 bool CutterCore::sdbSet(QString path, QString key, QString val)
@@ -332,6 +333,29 @@ QJsonDocument CutterCore::parseJson(const char *res, const char *cmd)
     return doc;
 }
 
+QStringList CutterCore::autocomplete(const QString &cmd, RLinePromptType promptType, size_t limit)
+{
+    RLineBuffer buf;
+    int c = snprintf(buf.data, sizeof(buf.data), "%s", cmd.toUtf8().constData());
+    if (c < 0) {
+        return {};
+    }
+    buf.index = buf.length = std::min((int)(sizeof(buf.data) - 1), c);
+
+    RLineCompletion completion;
+    r_line_completion_init(&completion, limit);
+    r_core_autocomplete(core(), &completion, &buf, promptType);
+
+    QStringList r;
+    r.reserve(r_pvector_len(&completion.args));
+    for (size_t i = 0; i< r_pvector_len(&completion.args); i++) {
+        r.push_back(QString::fromUtf8(reinterpret_cast<const char *>(r_pvector_at(&completion.args, i))));
+    }
+
+    r_line_completion_fini(&completion);
+    return r;
+}
+
 /**
  * @brief CutterCore::loadFile
  * Load initial file. TODO Maybe use the "o" commands?
@@ -393,7 +417,7 @@ bool CutterCore::loadFile(QString path, ut64 baddr, ut64 mapaddr, int perms, int
     }
 
     ut64 hashLimit = getConfigut64("cfg.hashlimit");
-    r_bin_file_hash(core_->bin, hashLimit, path.toUtf8().constData());
+    r_bin_file_hash(core_->bin, hashLimit, path.toUtf8().constData(), NULL);
 
     fflush(stdout);
     return true;
@@ -415,11 +439,11 @@ bool CutterCore::tryFile(QString path, bool rw)
     return true;
 }
 
-/*!
- * \brief Opens a file using r2 API
- * \param path Path to file
- * \param mapaddr Map Address
- * \return bool
+/**
+ * @brief Opens a file using r2 API
+ * @param path Path to file
+ * @param mapaddr Map Address
+ * @return bool
  */
 bool CutterCore::openFile(QString path, RVA mapaddr)
 {
@@ -767,25 +791,26 @@ void CutterCore::setEndianness(bool big)
     setConfig("cfg.bigendian", big);
 }
 
-void CutterCore::setBBSize(int size)
-{
-    setConfig("anal.bb.maxsize", size);
-}
-
-QString CutterCore::assemble(const QString &code)
+QByteArray CutterCore::assemble(const QString &code)
 {
     CORE_LOCK();
     RAsmCode *ac = r_asm_massemble(core_->assembler, code.toUtf8().constData());
-    QString hex(ac != nullptr ? ac->buf_hex : "");
+    QByteArray res;
+    if (ac && ac->bytes) {
+        res = QByteArray(reinterpret_cast<const char *>(ac->bytes), ac->len);
+    }
     r_asm_code_free(ac);
-    return hex;
+    return res;
 }
 
-QString CutterCore::disassemble(const QString &hex)
+QString CutterCore::disassemble(const QByteArray &data)
 {
     CORE_LOCK();
-    RAsmCode *ac = r_asm_mdisassemble_hexstr(core_->assembler, hex.toUtf8().constData());
-    QString code = QString(ac != nullptr ? ac->buf_asm : "");
+    RAsmCode *ac = r_asm_mdisassemble(core_->assembler, reinterpret_cast<const ut8 *>(data.constData()), data.length());
+    QString code;
+    if (ac && ac->assembly) {
+        code = QString::fromUtf8(ac->assembly);
+    }
     r_asm_code_free(ac);
     return code;
 }
@@ -798,15 +823,53 @@ QString CutterCore::disassembleSingleInstruction(RVA addr)
 RAnalFunction *CutterCore::functionAt(ut64 addr)
 {
     CORE_LOCK();
-    //return r_anal_fcn_find (core_->anal, addr, addr);
     return r_anal_get_fcn_in(core_->anal, addr, 0);
+}
+
+
+/**
+ * @brief finds the start address of a function in a given address
+ * @param addr - an address which belongs to a function
+ * @returns if function exists, return its start address. Otherwise return RVA_INVALID
+ */
+RVA CutterCore::getFunctionStart(RVA addr)
+{
+    CORE_LOCK();
+    RAnalFunction *fcn = Core()->functionAt(addr);
+    return fcn ? fcn->addr : RVA_INVALID;
+}
+
+/**
+ * @brief finds the end address of a function in a given address
+ * @param addr - an address which belongs to a function
+ * @returns if function exists, return its end address. Otherwise return RVA_INVALID
+ */
+RVA CutterCore::getFunctionEnd(RVA addr)
+{
+    CORE_LOCK();
+    RAnalFunction *fcn = Core()->functionAt(addr);
+    return fcn ? fcn->addr : RVA_INVALID;
+}
+
+/**
+ * @brief finds the last instruction of a function in a given address
+ * @param addr - an address which belongs to a function
+ * @returns if function exists, return the address of its last instruction. Otherwise return RVA_INVALID
+ */
+RVA CutterCore::getLastFunctionInstruction(RVA addr)
+{
+    CORE_LOCK();
+    RAnalFunction *fcn = Core()->functionAt(addr);
+    if (!fcn) {
+        return RVA_INVALID;
+    }
+    RAnalBlock *lastBB = (RAnalBlock *)r_list_last(fcn->bbs);
+    return lastBB ? lastBB->addr + r_anal_bb_offset_inst(lastBB, lastBB->ninstr-1) : RVA_INVALID;
 }
 
 QString CutterCore::cmdFunctionAt(QString addr)
 {
     QString ret;
-    //afi~name:1[1] @ 0x08048e44
-    //ret = cmd("afi~name[1] @ " + addr);
     ret = cmd(QString("fd @ ") + addr + "~[0]");
     return ret.trimmed();
 }
@@ -859,7 +922,7 @@ QString CutterCore::getDecompiledCodePDC(RVA addr)
 
 bool CutterCore::getR2DecAvailable()
 {
-    return cmd("e cmd.pdc=?").split('\n').contains(QStringLiteral("r2dec"));
+    return cmdList("e cmd.pdc=?").contains(QStringLiteral("r2dec"));
 }
 
 QString CutterCore::getDecompiledCodeR2Dec(RVA addr)
@@ -1332,13 +1395,8 @@ bool CutterCore::isGraphEmpty()
 
 void CutterCore::getOpcodes()
 {
-    QString opcodes = cmd("?O");
-    this->opcodes = opcodes.split("\n");
-    // Remove the last empty element
-    this->opcodes.removeLast();
-    QString registers = cmd("drp~[1]");
-    this->regs = registers.split("\n");
-    this->regs.removeLast();
+    this->opcodes = cmdList("?O");
+    this->regs = cmdList("drp~[1]");
 }
 
 void CutterCore::setSettings()
@@ -1353,7 +1411,6 @@ void CutterCore::setSettings()
 
     setConfig("anal.hasnext", false);
     setConfig("asm.lines.call", false);
-    setConfig("anal.autoname", true);
 
     setConfig("cfg.fortunes.tts", false);
 
@@ -1448,16 +1505,19 @@ QList<RIOPluginDescription> CutterCore::getRIOPluginDescriptions()
 {
     QList<RIOPluginDescription> ret;
 
-    QJsonArray plugins = cmdj("oLj").object()["IO_Plugins"].toArray();
+    QJsonArray plugins = cmdj("oLj").object()["io_plugins"].toArray();
     for (const QJsonValue &pluginValue : plugins) {
         QJsonObject pluginObject = pluginValue.toObject();
 
         RIOPluginDescription plugin;
 
-        plugin.name = pluginObject["Name"].toString();
-        plugin.description = pluginObject["Description"].toString();
-        plugin.license = pluginObject["License"].toString();
-        plugin.permissions = pluginObject["Permissions"].toString();
+        plugin.name = pluginObject["name"].toString();
+        plugin.description = pluginObject["description"].toString();
+        plugin.license = pluginObject["license"].toString();
+        plugin.permissions = pluginObject["permissions"].toString();
+        for (const auto &uri : pluginObject["uris"].toArray()) {
+            plugin.uris << uri.toString();
+        }
 
         ret << plugin;
     }
@@ -1510,7 +1570,32 @@ QList<RAsmPluginDescription> CutterCore::getRAsmPluginDescriptions()
 
 QList<FunctionDescription> CutterCore::getAllFunctions()
 {
-    return parseFunctionsJson(cmdjTask("aflj"));
+    CORE_LOCK();
+
+    QList<FunctionDescription> funcList;
+    funcList.reserve(r_list_length(core_->anal->fcns));
+
+    RListIter *iter;
+    RAnalFunction *fcn;
+    CutterRListForeach (core_->anal->fcns, iter, RAnalFunction, fcn) {
+        FunctionDescription function;
+        function.offset = fcn->addr;
+        function.size = r_anal_fcn_size(fcn);
+        function.nargs = r_anal_var_count(core_->anal, fcn, 'b', 1) +
+            r_anal_var_count(core_->anal, fcn, 'r', 1) +
+            r_anal_var_count(core_->anal, fcn, 's', 1);
+        function.nlocals = r_anal_var_count(core_->anal, fcn, 'b', 0) +
+            r_anal_var_count(core_->anal, fcn, 'r', 0) +
+            r_anal_var_count(core_->anal, fcn, 's', 0);
+        function.nbbs = r_list_length (fcn->bbs);
+        function.calltype = fcn->cc ? QString::fromUtf8(fcn->cc) : QString();
+        function.name = fcn->name ? QString::fromUtf8(fcn->name) : QString();
+        function.edges = r_anal_fcn_count_edges(fcn, nullptr);
+        function.stackframe = fcn->maxstack;
+        funcList.append(function);
+    }
+
+    return funcList;
 }
 
 QList<ImportDescription> CutterCore::getAllImports()
@@ -1588,7 +1673,7 @@ QList<SymbolDescription> CutterCore::getAllSymbols()
             SymbolDescription symbol;
             symbol.vaddr = entry->vaddr;
             symbol.name = QString("entry") + QString::number(n++);
-            symbol.bind = "";
+            symbol.bind.clear();
             symbol.type = "entry";
             ret << symbol;
         }
@@ -1623,7 +1708,7 @@ QList<HeaderDescription> CutterCore::getAllHeaders()
 QList<ZignatureDescription> CutterCore::getAllZignatures()
 {
     CORE_LOCK();
-    QList<ZignatureDescription> ret;
+    QList<ZignatureDescription> zignatures;
 
     QJsonArray zignaturesArray = cmdj("zj").array();
 
@@ -1645,10 +1730,10 @@ QList<ZignatureDescription> CutterCore::getAllZignatures()
         zignature.edges = graphObject[RJsonKey::edges].toVariant().toULongLong();
         zignature.ebbs = graphObject[RJsonKey::ebbs].toVariant().toULongLong();
 
-        ret << zignature;
+        zignatures << zignature;
     }
 
-    return ret;
+    return zignatures;
 }
 
 QList<CommentDescription> CutterCore::getAllComments(const QString &filterType)
@@ -1729,35 +1814,6 @@ QList<StringDescription> CutterCore::parseStringsJson(const QJsonDocument &doc)
     return ret;
 }
 
-QList<FunctionDescription> CutterCore::parseFunctionsJson(const QJsonDocument &doc)
-{
-    QList<FunctionDescription> ret;
-    QJsonArray jsonArray = doc.array();
-
-    for (const QJsonValue &value : jsonArray) {
-        QJsonObject jsonObject = value.toObject();
-
-        FunctionDescription function;
-
-        function.offset = jsonObject[RJsonKey::offset].toVariant().toULongLong();
-        function.size = jsonObject[RJsonKey::size].toVariant().toULongLong();
-        function.nargs = jsonObject[RJsonKey::nargs].toVariant().toULongLong();
-        function.nbbs = jsonObject[RJsonKey::nbbs].toVariant().toULongLong();
-        function.nlocals = jsonObject[RJsonKey::nlocals].toVariant().toULongLong();
-        function.cc = jsonObject[RJsonKey::cc].toVariant().toULongLong();
-        function.calltype = jsonObject[RJsonKey::calltype].toString();
-        function.name = jsonObject[RJsonKey::name].toString();
-        function.edges = jsonObject[RJsonKey::edges].toVariant().toULongLong();
-        function.cost = jsonObject[RJsonKey::cost].toVariant().toULongLong();
-        function.calls = jsonObject[RJsonKey::outdegree].toVariant().toULongLong();
-        function.stackframe = jsonObject[RJsonKey::stackframe].toVariant().toULongLong();
-
-        ret << function;
-    }
-
-    return ret;
-}
-
 QList<FlagspaceDescription> CutterCore::getAllFlagspaces()
 {
     CORE_LOCK();
@@ -1804,7 +1860,7 @@ QList<FlagDescription> CutterCore::getAllFlags(QString flagspace)
 QList<SectionDescription> CutterCore::getAllSections()
 {
     CORE_LOCK();
-    QList<SectionDescription> ret;
+    QList<SectionDescription> sections;
 
     QJsonDocument sectionsDoc = cmdj("iSj entropy");
     QJsonObject sectionsObj = sectionsDoc.object();
@@ -1823,12 +1879,12 @@ QList<SectionDescription> CutterCore::getAllSections()
         section.vsize = sectionObject[RJsonKey::vsize].toVariant().toULongLong();
         section.paddr = sectionObject[RJsonKey::paddr].toVariant().toULongLong();
         section.size = sectionObject[RJsonKey::size].toVariant().toULongLong();
-        section.flags = sectionObject[RJsonKey::flags].toString();
+        section.perm = sectionObject[RJsonKey::perm].toString();
         section.entropy =  sectionObject[RJsonKey::entropy].toString();
 
-        ret << section;
+        sections << section;
     }
-    return ret;
+    return sections;
 }
 
 QStringList CutterCore::getSectionList()
@@ -2066,25 +2122,25 @@ QList<AnalBaseClassDescription> CutterCore::getAnalClassBaseClasses(const QStrin
 
 QList<AnalVTableDescription> CutterCore::getAnalClassVTables(const QString &cls)
 {
-    QList<AnalVTableDescription> ret;
+    QList<AnalVTableDescription> acVtables;
 
     RVector *vtables = r_anal_class_vtable_get_all(core_->anal, cls.toUtf8().constData());
     if (!vtables) {
-        return ret;
+        return acVtables;
     }
 
-    ret.reserve(static_cast<int>(vtables->len));
+    acVtables.reserve(static_cast<int>(vtables->len));
     RAnalVTable *vtable;
     CutterRVectorForeach(vtables, vtable, RAnalVTable) {
         AnalVTableDescription desc;
         desc.id = QString::fromUtf8(vtable->id);
         desc.offset = vtable->offset;
         desc.addr = vtable->addr;
-        ret.append(desc);
+        acVtables.append(desc);
     }
     r_vector_free(vtables);
 
-    return ret;
+    return acVtables;
 }
 
 void CutterCore::createNewClass(const QString &cls)
@@ -2133,7 +2189,7 @@ void CutterCore::renameAnalMethod(const QString &className, const QString &oldMe
 QList<ResourcesDescription> CutterCore::getAllResources()
 {
     CORE_LOCK();
-    QList<ResourcesDescription> ret;
+    QList<ResourcesDescription> resources;
 
     QJsonArray resourcesArray = cmdj("iRj").array();
     for (const QJsonValue &value : resourcesArray) {
@@ -2148,15 +2204,15 @@ QList<ResourcesDescription> CutterCore::getAllResources()
         res.size = resourceObject[RJsonKey::size].toVariant().toULongLong();
         res.lang = resourceObject[RJsonKey::lang].toString();
 
-        ret << res;
+        resources << res;
     }
-    return ret;
+    return resources;
 }
 
 QList<VTableDescription> CutterCore::getAllVTables()
 {
     CORE_LOCK();
-    QList<VTableDescription> ret;
+    QList<VTableDescription> vtables;
 
     QJsonArray vTablesArray = cmdj("avj").array();
     for (const QJsonValue &vTableValue : vTablesArray) {
@@ -2178,28 +2234,28 @@ QList<VTableDescription> CutterCore::getAllVTables()
             res.methods << method;
         }
 
-        ret << res;
+        vtables << res;
     }
-    return ret;
+    return vtables;
 }
 
 QList<TypeDescription> CutterCore::getAllTypes()
 {
-    QList<TypeDescription> ret;
+    QList<TypeDescription> types;
 
-    ret.append(getAllPrimitiveTypes());
-    ret.append(getAllUnions());
-    ret.append(getAllStructs());
-    ret.append(getAllEnums());
-    ret.append(getAllTypedefs());
+    types.append(getAllPrimitiveTypes());
+    types.append(getAllUnions());
+    types.append(getAllStructs());
+    types.append(getAllEnums());
+    types.append(getAllTypedefs());
 
-    return ret;
+    return types;
 }
 
 QList<TypeDescription> CutterCore::getAllPrimitiveTypes()
 {
     CORE_LOCK();
-    QList<TypeDescription> ret;
+    QList<TypeDescription> primitiveTypes;
 
     QJsonArray typesArray = cmdj("tj").array();
     for (const QJsonValue &value : typesArray) {
@@ -2211,16 +2267,16 @@ QList<TypeDescription> CutterCore::getAllPrimitiveTypes()
         exp.size = typeObject[RJsonKey::size].toVariant().toULongLong();
         exp.format = typeObject[RJsonKey::format].toString();
         exp.category = tr("Primitive");
-        ret << exp;
+        primitiveTypes << exp;
     }
 
-    return ret;
+    return primitiveTypes;
 }
 
 QList<TypeDescription> CutterCore::getAllUnions()
 {
     CORE_LOCK();
-    QList<TypeDescription> ret;
+    QList<TypeDescription> unions;
 
     QJsonArray typesArray = cmdj("tuj").array();
     for (const QJsonValue value: typesArray) {
@@ -2231,16 +2287,16 @@ QList<TypeDescription> CutterCore::getAllUnions()
         exp.type = typeObject[RJsonKey::type].toString();
         exp.size = typeObject[RJsonKey::size].toVariant().toULongLong();
         exp.category = "Union";
-        ret << exp;
+        unions << exp;
     }
 
-    return ret;
+    return unions;
 }
 
 QList<TypeDescription> CutterCore::getAllStructs()
 {
     CORE_LOCK();
-    QList<TypeDescription> ret;
+    QList<TypeDescription> structs;
 
     QJsonArray typesArray = cmdj("tsj").array();
     for (const QJsonValue value: typesArray) {
@@ -2251,16 +2307,16 @@ QList<TypeDescription> CutterCore::getAllStructs()
         exp.type = typeObject[RJsonKey::type].toString();
         exp.size = typeObject[RJsonKey::size].toVariant().toULongLong();
         exp.category = "Struct";
-        ret << exp;
+        structs << exp;
     }
 
-    return ret;
+    return structs;
 }
 
 QList<TypeDescription> CutterCore::getAllEnums()
 {
     CORE_LOCK();
-    QList<TypeDescription> ret;
+    QList<TypeDescription> enums;
 
     QJsonObject typesObject = cmdj("tej").object();
     for (QString key: typesObject.keys()) {
@@ -2268,16 +2324,16 @@ QList<TypeDescription> CutterCore::getAllEnums()
         exp.type = key;
         exp.size = 0;
         exp.category = "Enum";
-        ret << exp;
+        enums << exp;
     }
 
-    return ret;
+    return enums;
 }
 
 QList<TypeDescription> CutterCore::getAllTypedefs()
 {
     CORE_LOCK();
-    QList<TypeDescription> ret;
+    QList<TypeDescription> typeDefs;
 
     QJsonObject typesObject = cmdj("ttj").object();
     for (QString key: typesObject.keys()) {
@@ -2285,40 +2341,47 @@ QList<TypeDescription> CutterCore::getAllTypedefs()
         exp.type = key;
         exp.size = 0;
         exp.category = "Typedef";
-        ret << exp;
+        typeDefs << exp;
     }
 
-    return ret;
+    return typeDefs;
 }
 
 QString CutterCore::addTypes(const char *str)
 {
     char *error_msg = nullptr;
     char *parsed = r_parse_c_string(core_->anal, str, &error_msg);
+    QString error;
 
     if (!parsed) {
-         QString ret;
          if (error_msg) {
-             ret = error_msg;
+             error = error_msg;
              r_mem_free(error_msg);
          }
-         return ret;
+         return error;
     }
 
-    r_core_save_parsed_type(core_, parsed);
+    r_anal_save_parsed_type(core_->anal, parsed);
     r_mem_free(parsed);
 
     if (error_msg) {
+        error = error_msg;
         r_mem_free(error_msg);
     }
 
-    return QString();
+    return error;
+}
+
+bool CutterCore::isAddressMapped(RVA addr)
+{
+    // If value returned by "om. @ addr" is empty means that address is not mapped
+    return !Core()->cmd(QString("om. @ %1").arg(addr)).isEmpty();
 }
 
 QList<SearchDescription> CutterCore::getAllSearch(QString search_for, QString space)
 {
     CORE_LOCK();
-    QList<SearchDescription> ret;
+    QList<SearchDescription> searchRef;
 
     QJsonArray searchArray = cmdj(space + QString(" ") + search_for).array();
 
@@ -2328,7 +2391,7 @@ QList<SearchDescription> CutterCore::getAllSearch(QString search_for, QString sp
 
             SearchDescription exp;
 
-            exp.code = QString("");
+            exp.code.clear();
             for (const QJsonValue &value2 : searchObject[RJsonKey::opcodes].toArray()) {
                 QJsonObject gadget = value2.toObject();
                 exp.code += gadget[RJsonKey::opcode].toString() + ";  ";
@@ -2338,7 +2401,7 @@ QList<SearchDescription> CutterCore::getAllSearch(QString search_for, QString sp
                 searchObject[RJsonKey::opcodes].toArray().first().toObject()[RJsonKey::offset].toVariant().toULongLong();
             exp.size = searchObject[RJsonKey::size].toVariant().toULongLong();
 
-            ret << exp;
+            searchRef << exp;
         }
     } else {
         for (const QJsonValue &value : searchArray) {
@@ -2351,25 +2414,25 @@ QList<SearchDescription> CutterCore::getAllSearch(QString search_for, QString sp
             exp.code = searchObject[RJsonKey::code].toString();
             exp.data = searchObject[RJsonKey::data].toString();
 
-            ret << exp;
+            searchRef << exp;
         }
     }
-    return ret;
+    return searchRef;
 }
 
 BlockStatistics CutterCore::getBlockStatistics(unsigned int blocksCount)
 {
+    BlockStatistics blockStats;
     if (blocksCount == 0) {
-        BlockStatistics ret;
-        ret.from = ret.to = ret.blocksize = 0;
-        return ret;
+        blockStats.from = blockStats.to = blockStats.blocksize = 0;
+        return blockStats;
     }
+
     QJsonObject statsObj = cmdj("p-j " + QString::number(blocksCount)).object();
 
-    BlockStatistics ret;
-    ret.from = statsObj[RJsonKey::from].toVariant().toULongLong();
-    ret.to = statsObj[RJsonKey::to].toVariant().toULongLong();
-    ret.blocksize = statsObj[RJsonKey::blocksize].toVariant().toULongLong();
+    blockStats.from = statsObj[RJsonKey::from].toVariant().toULongLong();
+    blockStats.to = statsObj[RJsonKey::to].toVariant().toULongLong();
+    blockStats.blocksize = statsObj[RJsonKey::blocksize].toVariant().toULongLong();
 
     QJsonArray blocksArray = statsObj[RJsonKey::blocks].toArray();
 
@@ -2401,16 +2464,16 @@ BlockStatistics CutterCore::getBlockStatistics(unsigned int blocksCount)
             }
         }
 
-        ret.blocks << block;
+        blockStats.blocks << block;
     }
 
-    return ret;
+    return blockStats;
 }
 
 QList<XrefDescription> CutterCore::getXRefs(RVA addr, bool to, bool whole_function,
                                             const QString &filterType)
 {
-    QList<XrefDescription> ret = QList<XrefDescription>();
+    QList<XrefDescription> xrefList = QList<XrefDescription>();
 
     QJsonArray xrefsArray;
 
@@ -2454,10 +2517,10 @@ QList<XrefDescription> CutterCore::getXRefs(RVA addr, bool to, bool whole_functi
         }
         xref.to_str = Core()->cmd("fd " + QString::number(xref.to)).trimmed();
 
-        ret << xref;
+        xrefList << xref;
     }
 
-    return ret;
+    return xrefList;
 }
 
 void CutterCore::addFlag(RVA offset, QString name, RVA size)
@@ -2569,8 +2632,63 @@ QList<DisassemblyLine> CutterCore::disassembleLines(RVA offset, int lines)
     return r;
 }
 
+
+/**
+ * @brief return hexdump of <size> from an <offset> by a given formats
+ * @param address - the address from which to print the hexdump
+ * @param size - number of bytes to print 
+ * @param format - the type of hexdump (qwords, words. decimal, etc)
+ */
+QString CutterCore::hexdump(RVA address, int size, HexdumpFormats format)
+{
+    QString command = "px";
+    switch (format) {
+    case HexdumpFormats::Normal:
+        break;
+    case HexdumpFormats::Half:
+        command += "h";
+        break;
+    case HexdumpFormats::Word:
+        command += "w";
+        break;
+    case HexdumpFormats::Quad:
+        command += "q";
+        break;
+    case HexdumpFormats::Signed:
+        command += "d";
+        break;
+    case HexdumpFormats::Octal:
+        command += "o";
+        break;
+    }
+
+    return cmd(QString("%1 %2 @ %3")
+                        .arg(command)
+                        .arg(size)
+                        .arg(address));
+}
+
+QByteArray CutterCore::hexStringToBytes(const QString &hex)
+{
+    QByteArray hexChars = hex.toUtf8();
+    QByteArray bytes;
+    bytes.reserve(hexChars.length() / 2);
+    int size = r_hex_str2bin(hexChars.constData(), reinterpret_cast<ut8 *>(bytes.data()));
+    bytes.resize(size);
+    return bytes;
+}
+
+QString CutterCore::bytesToHexString(const QByteArray &bytes)
+{
+    QByteArray hex;
+    hex.resize(bytes.length() * 2);
+    r_hex_bin2str(reinterpret_cast<const ut8 *>(bytes.constData()), bytes.size(), hex.data());
+    return QString::fromUtf8(hex);
+}
+
 void CutterCore::loadScript(const QString &scriptname)
 {
+    CORE_LOCK();
     r_core_task_sync_begin(core_);
     r_core_cmd_file(core_, scriptname.toUtf8().constData());
     r_core_task_sync_end(core_);
@@ -2580,7 +2698,7 @@ void CutterCore::loadScript(const QString &scriptname)
 QString CutterCore::getVersionInformation()
 {
     int i;
-    QString ret;
+    QString versionInfo;
     struct vcs_t {
         const char *name;
         const char *(*callback)();
@@ -2611,13 +2729,13 @@ QString CutterCore::getVersionInformation()
         /* ... */
         {NULL, NULL}
     };
-    ret.append(QString("%1 r2\n").arg(R2_GITTAP));
+    versionInfo.append(QString("%1 r2\n").arg(R2_GITTAP));
     for (i = 0; vcs[i].name; i++) {
         struct vcs_t *v = &vcs[i];
         const char *name = v->callback ();
-        ret.append(QString("%1 %2\n").arg(name, v->name));
+        versionInfo.append(QString("%1 %2\n").arg(name, v->name));
     }
-    return ret;
+    return versionInfo;
 }
 
 QJsonArray CutterCore::getOpenedFiles()
@@ -2644,7 +2762,7 @@ QString CutterCore::ansiEscapeToHtml(const QString &text)
         return QString();
     }
     QString r = QString::fromUtf8(html, len);
-    free(html);
+    r_mem_free(html);
     return r;
 }
 
@@ -2652,3 +2770,80 @@ BasicBlockHighlighter* CutterCore::getBBHighlighter()
 {
     return bbHighlighter;
 }
+
+
+/**
+ * @brief get a compact disassembly preview for tooltips
+ * @param address - the address from which to print the disassembly
+ * @param num_of_lines - number of instructions to print 
+ */
+QStringList CutterCore::getDisassemblyPreview(RVA address, int num_of_lines)
+{
+     QList<DisassemblyLine> disassemblyLines;
+        {
+            // temporarily simplify the disasm output to get it colorful and simple to read
+            TempConfig tempConfig;
+            tempConfig
+                .set("scr.color", COLOR_MODE_16M)
+                .set("asm.lines", false)
+                .set("asm.var", false)
+                .set("asm.comments", false)
+                .set("asm.bytes", false)
+                .set("asm.lines.fcn", false)
+                .set("asm.lines.out", false)
+                .set("asm.lines.bb", false)
+                .set("asm.bb.line", false);
+
+            disassemblyLines = disassembleLines(address, num_of_lines + 1);
+        }
+        QStringList disasmPreview;
+        for (const DisassemblyLine &line : disassemblyLines) {
+            disasmPreview << line.text;
+            if (disasmPreview.length() >= num_of_lines) {
+                disasmPreview << "...";
+                break;
+            }
+        }
+        if (!disasmPreview.isEmpty()) {
+            return disasmPreview;
+        } else {
+            return QStringList();
+        }
+}
+
+/**
+ * @brief get a compact hexdump preview for tooltips
+ * @param address - the address from which to print the hexdump
+ * @param size - number of bytes to print 
+ */
+QString CutterCore::getHexdumpPreview(RVA address, int size)
+{     
+    // temporarily simplify the disasm output to get it colorful and simple to read
+    TempConfig tempConfig;
+    tempConfig
+        .set("scr.color", COLOR_MODE_16M)
+        .set("asm.offset", true)
+        .set("hex.header", false)
+        .set("hex.cols", 16);
+    return ansiEscapeToHtml(hexdump(address, size, HexdumpFormats::Normal)).replace(QLatin1Char('\n'), "<br>");
+}
+
+QByteArray CutterCore::ioRead(RVA addr, int len)
+{
+    CORE_LOCK();
+
+    QByteArray array;
+
+    if (len <= 0)
+        return array;
+
+    /* Zero-copy */
+    array.resize(len);
+    if (!r_io_read_at(core_->io, addr, (uint8_t *)array.data(), len)) {
+        qWarning() << "Can't read data" << addr << len;
+        array.fill(0xff);
+    }
+
+    return  array;
+}
+

@@ -2,7 +2,7 @@
 #define DISASSEMBLYWIDGET_H
 
 #include "core/Cutter.h"
-#include "CutterDockWidget.h"
+#include "MemoryDockWidget.h"
 #include "common/CutterSeekable.h"
 #include "common/RefreshDeferrer.h"
 
@@ -16,7 +16,7 @@ class DisassemblyTextEdit;
 class DisassemblyScrollArea;
 class DisassemblyContextMenu;
 
-class DisassemblyWidget : public CutterDockWidget
+class DisassemblyWidget : public MemoryDockWidget
 {
     Q_OBJECT
 public:
@@ -30,11 +30,11 @@ public slots:
     void colorsUpdatedSlot();
     void seekPrev();
     void toggleSync();
+    void setPreviewMode(bool previewMode);
 
-private slots:
+protected slots:
     void on_seekChanged(RVA offset);
     void refreshDisasm(RVA offset = RVA_INVALID);
-    void raisePrioritizedMemoryWidget(CutterCore::MemoryWidgetType type);
 
     void scrollInstructions(int count);
     bool updateMaxLines();
@@ -44,19 +44,23 @@ private slots:
     void zoomIn();
     void zoomOut();
 
-private:
+protected:
     DisassemblyContextMenu *mCtxMenu;
     DisassemblyScrollArea *mDisasScrollArea;
     DisassemblyTextEdit *mDisasTextEdit;
 
+private:
     RVA topOffset;
     RVA bottomOffset;
     int maxLines;
 
-    /*!
+    QString curHighlightedWord;
+
+    /**
      * offset of lines below the first line of the current seek
      */
     int cursorLineOffset;
+    int cursorCharOffset;
     bool seekFromCursor;
 
     RefreshDeferrer *disasmRefresh;
@@ -75,6 +79,8 @@ private:
     void connectCursorPositionChanged(bool disconnect);
 
     void moveCursorRelative(bool up, bool page);
+    QList<QTextEdit::ExtraSelection> getSameWordsSelections();
+
     QAction syncIt;
     CutterSeekable *seekable;
 };

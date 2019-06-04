@@ -2,8 +2,10 @@
 #include "ui_RegisterRefsWidget.h"
 #include "core/MainWindow.h"
 #include "common/Helpers.h"
+
 #include <QMenu>
 #include <QClipboard>
+#include <QShortcut>
 
 RegisterRefModel::RegisterRefModel(QList<RegisterRefDescription> *registerRefs, QObject *parent)
     : QAbstractListModel(parent),
@@ -116,8 +118,8 @@ RegisterRefsWidget::RegisterRefsWidget(MainWindow *main, QAction *action) :
     ui->registerRefTreeView->setModel(registerRefProxyModel);
     ui->registerRefTreeView->sortByColumn(RegisterRefModel::RegColumn, Qt::AscendingOrder);
 
-    actionCopyValue = new QAction(tr("Copy register value"));
-    actionCopyRef = new QAction(tr("Copy register reference"));
+    actionCopyValue = new QAction(tr("Copy register value"), this);
+    actionCopyRef = new QAction(tr("Copy register reference"), this);
 
     refreshDeferrer = createRefreshDeferrer([this](){
         refreshRegisterRef();

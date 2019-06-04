@@ -37,7 +37,7 @@ private:
     QList<SectionDescription> *sections;
 
 public:
-    enum Column { NameColumn = 0, SizeColumn, AddressColumn, EndAddressColumn, EntropyColumn, ColumnCount };
+    enum Column { NameColumn = 0, SizeColumn, AddressColumn, EndAddressColumn, PermissionsColumn, EntropyColumn, ColumnCount };
     enum Role { SectionDescriptionRole = Qt::UserRole };
 
     SectionsModel(QList<SectionDescription> *sections, QObject *parent = nullptr);
@@ -70,8 +70,12 @@ public:
 
 private slots:
     void refreshSections();
+    void refreshDocks();
+
     void onSectionsDoubleClicked(const QModelIndex &index);
-    void onSectionsSeekChanged(RVA addr);
+
+protected:
+    void resizeEvent(QResizeEvent *event) override;
 
 private:
     QList<SectionDescription> sections;
@@ -82,12 +86,20 @@ private:
     QWidget *dockWidgetContents;
     QuickFilterView *quickFilterView;
 
-    RefreshDeferrer *refreshDeferrer;
-
     QWidget *addrDockWidget;
     RawAddrDock *rawAddrDock;
     VirtualAddrDock *virtualAddrDock;
     QToolButton *toggleButton;
+
+    /**
+     * RefreshDeferrer for loading the section data
+     */
+    RefreshDeferrer *sectionsRefreshDeferrer;
+
+    /**
+     * RefreshDeferrer for updating the visualization docks
+     */
+    RefreshDeferrer *dockRefreshDeferrer;
 
     void initSectionsTable();
     void initQuickFilter();
@@ -110,13 +122,13 @@ public:
     virtual void updateDock();
 
 protected:
-    int indicatorWidth;
     int indicatorHeight;
     int indicatorParamPosY;
     float heightThreshold;
     float heightDivisor;
     int rectOffset;
-    int rectWidth;
+    int rectWidthMin;
+    int rectWidthMax;
     QColor indicatorColor;
     QColor textColor;
     AddrDockScene *addrDockScene;
@@ -125,6 +137,12 @@ protected:
 
     void addTextItem(QColor color, QPoint pos, QString string);
     int getAdjustedSize(int size, int validMinSize);
+    int getRectWidth();
+    int getIndicatorWidth();
+    int getValidMinSize();
+
+    virtual RVA getSizeOfSection(const SectionDescription &section) =0;
+    virtual RVA getAddressOfSection(const SectionDescription &section) =0;
 
 private:
     void drawIndicator(QString name, float ratio);
@@ -141,9 +159,9 @@ public:
     bool disableCenterOn;
 
     QHash<QString, RVA> nameAddrMap;
-    QHash<QString, int> nameAddrSizeMap;
+    QHash<QString, RVA> nameAddrSizeMap;
     QHash<QString, RVA> seekAddrMap;
-    QHash<QString, int> seekAddrSizeMap;
+    QHash<QString, RVA> seekAddrSizeMap;
     QHash<QString, int> namePosYMap;
     QHash<QString, int> nameHeightMap;
 
@@ -161,10 +179,13 @@ class RawAddrDock : public AbstractAddrDock
 
 public:
     explicit RawAddrDock(SectionsModel *model, QWidget *parent = nullptr);
-    ~RawAddrDock();
+    ~RawAddrDock() = default;
 
     void updateDock() override;
-    int getValidMinSize();
+
+protected:
+    RVA getSizeOfSection(const SectionDescription &section) override { return section.size; };
+    RVA getAddressOfSection(const SectionDescription &section) override { return section.paddr; };
 };
 
 class VirtualAddrDock : public AbstractAddrDock
@@ -173,10 +194,13 @@ class VirtualAddrDock : public AbstractAddrDock
 
 public:
     explicit VirtualAddrDock(SectionsModel *model, QWidget *parent = nullptr);
-    ~VirtualAddrDock();
+    ~VirtualAddrDock() = default;
 
     void updateDock() override;
-    int getValidMinSize();
+
+protected:
+    RVA getSizeOfSection(const SectionDescription &section) override { return section.vsize; };
+    RVA getAddressOfSection(const SectionDescription &section) override { return section.vaddr; };
 };
 
 #endif // SECTIONSWIDGET_H

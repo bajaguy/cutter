@@ -127,8 +127,8 @@ BreakpointWidget::BreakpointWidget(MainWindow *main, QAction *action) :
     });
 
     setScrollMode();
-    actionDelBreakpoint = new QAction(tr("Delete breakpoint"));
-    actionToggleBreakpoint = new QAction(tr("Toggle breakpoint"));
+    actionDelBreakpoint = new QAction(tr("Delete breakpoint"), this);
+    actionToggleBreakpoint = new QAction(tr("Toggle breakpoint"), this);
     connect(actionDelBreakpoint, &QAction::triggered, this, &BreakpointWidget::delBreakpoint);
     connect(actionToggleBreakpoint, &QAction::triggered, this, &BreakpointWidget::toggleBreakpoint);
     connect(Core(), &CutterCore::refreshAll, this, &BreakpointWidget::refreshBreakpoint);
@@ -186,12 +186,12 @@ void BreakpointWidget::showBreakpointContextMenu(const QPoint &pt)
 
 void BreakpointWidget::addBreakpointDialog()
 {
-    BreakpointsDialog *dialog = new BreakpointsDialog(this);
+    BreakpointsDialog dialog(this);
 
-    if (dialog->exec()) {
-        QString bps = dialog->getBreakpoints();
+    if (dialog.exec()) {
+        QString bps = dialog.getBreakpoints();
         if (!bps.isEmpty()) {
-            QStringList bpList = bps.split(' ', QString::SkipEmptyParts);
+            QStringList bpList = bps.split(QLatin1Char(' '), QString::SkipEmptyParts);
             for (const QString &bp : bpList) {
                 Core()->toggleBreakpoint(bp);
             }

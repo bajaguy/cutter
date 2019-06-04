@@ -132,16 +132,10 @@ QVariant FunctionModel::data(const QModelIndex &index, int role) const
                 case 5:
                     return tr("Nlocals: %1").arg(RSizeString(function.nlocals));
                 case 6:
-                    return tr("Cyclomatic complexity: %1").arg(RSizeString(function.cc));
-                case 7:
                     return tr("Call type: %1").arg(function.calltype);
-                case 8:
+                case 7:
                     return tr("Edges: %1").arg(function.edges);
-                case 9:
-                    return tr("Cost: %1").arg(function.cost);
-                case 10:
-                    return tr("Calls/OutDegree: %1").arg(function.calls);
-                case 11:
+                case 8:
                     return tr("StackFrame: %1").arg(function.stackframe);
                 default:
                     return QVariant();
@@ -158,20 +152,14 @@ QVariant FunctionModel::data(const QModelIndex &index, int role) const
                 return RAddressString(function.offset);
             case NargsColumn:
                 return function.nargs;
-            case NbbsColumn:
-                return function.nbbs;
             case NlocalsColumn:
                 return function.nlocals;
-            case CcColumn:
-                return function.cc;
+            case NbbsColumn:
+                return function.nbbs;
             case CalltypeColumn:
                 return function.calltype;
             case EdgesColumn:
                 return function.edges;
-            case CostColumn:
-                return function.cost;
-            case CallsColumn:
-                return function.calls;
             case FrameColumn:
                 return function.stackframe;
             default:
@@ -181,8 +169,10 @@ QVariant FunctionModel::data(const QModelIndex &index, int role) const
 
     case Qt::DecorationRole:
         if (importAddresses->contains(function.offset) &&
-                (nested ? false : index.column() == ImportColumn))
-            return QIcon(":/img/icons/import_light.svg");
+                (nested ? false : index.column() == ImportColumn)) {
+            const static QIcon importIcon(":/img/icons/import_light.svg");
+            return importIcon;
+        }
         return QVariant();
 
     case Qt::FontRole:
@@ -196,38 +186,9 @@ QVariant FunctionModel::data(const QModelIndex &index, int role) const
         return static_cast<int>(Qt::AlignLeft | Qt::AlignVCenter);
 
     case Qt::ToolTipRole: {
-        QList<DisassemblyLine> disassemblyLines;
-        {
-            // temporarily simplify the disasm output to get it colorful and simple to read
-            TempConfig tempConfig;
-            tempConfig
-                .set("scr.color", COLOR_MODE_16M)
-                .set("asm.lines", false)
-                .set("asm.var", false)
-                .set("asm.comments", false)
-                .set("asm.bytes", false)
-                .set("asm.lines.fcn", false)
-                .set("asm.lines.out", false)
-                .set("asm.lines.bb", false)
-                .set("asm.bbline", false)
-                .set("asm.stackptr", false);
 
-            disassemblyLines = Core()->disassembleLines(function.offset, kMaxTooltipDisasmPreviewLines + 1);
-        }
-        QStringList disasmPreview;
-        for (const DisassemblyLine &line : disassemblyLines) {
-            if (!function.contains(line.offset)) {
-                break;
-            }
-            disasmPreview << line.text;
-            if (disasmPreview.length() >= kMaxTooltipDisasmPreviewLines) {
-                disasmPreview << "...";
-                break;
-            }
-        }
-
-        const QStringList &summary = Core()->cmd(QString("pdsf @ %1").arg(function.offset)).split("\n", QString::SkipEmptyParts);
-
+        QStringList disasmPreview = Core()->getDisassemblyPreview(function.offset, kMaxTooltipDisasmPreviewLines);
+        const QStringList &summary = Core()->cmdList(QString("pdsf @ %1").arg(function.offset));
         const QFont &fnt = Config()->getFont();
         QFontMetrics fm{ fnt };
 
@@ -253,7 +214,7 @@ QVariant FunctionModel::data(const QModelIndex &index, int role) const
 
         if (!highlights.isEmpty()) {
             toolTipContent += tr("<div><strong>Highlights</strong>:<br>%1</div>")
-                .arg(highlights.join("\n").toHtmlEscaped().replace("\n", "<br>"));
+                .arg(highlights.join(QLatin1Char('\n')).toHtmlEscaped().replace(QLatin1Char('\n'), "<br>"));
         }
         toolTipContent += "</div></html>";
         return toolTipContent;
@@ -294,20 +255,14 @@ QVariant FunctionModel::headerData(int section, Qt::Orientation orientation, int
                 return tr("Offset");
             case NargsColumn:
                 return tr("Nargs");
-            case NbbsColumn:
-                return tr("Nbbs");
             case NlocalsColumn:
                 return tr("Nlocals");
-            case CcColumn:
-                return tr("Cyclo. Comp.");
+            case NbbsColumn:
+                return tr("Nbbs");
             case CalltypeColumn:
                 return tr("Call type");
             case EdgesColumn:
                 return tr("Edges");
-            case CostColumn:
-                return tr("Cost");
-            case CallsColumn:
-                return tr("Calls/OutDeg.");
             case FrameColumn:
                 return tr("StackFrame");
             default:
@@ -429,32 +384,19 @@ bool FunctionSortFilterProxyModel::lessThan(const QModelIndex &left, const QMode
             if (left_function.nargs != right_function.nargs)
                 return left_function.nargs < right_function.nargs;
             break;
-        case FunctionModel::NbbsColumn:
-            if (left_function.nbbs != right_function.nbbs)
-                return left_function.nbbs < right_function.nbbs;
-            break;
         case FunctionModel::NlocalsColumn:
             if (left_function.nlocals != right_function.nlocals)
                 return left_function.nlocals < right_function.nlocals;
             break;
-        case FunctionModel::CcColumn:
-            if (left_function.cc != right_function.cc)
-                return left_function.cc < right_function.cc;
+        case FunctionModel::NbbsColumn:
+            if (left_function.nbbs != right_function.nbbs)
+                return left_function.nbbs < right_function.nbbs;
             break;
         case FunctionModel::CalltypeColumn:
             return left_function.calltype < right_function.calltype;
-            break;
         case FunctionModel::EdgesColumn:
             if (left_function.edges != right_function.edges)
                 return left_function.edges < right_function.edges;
-            break;
-        case FunctionModel::CostColumn:
-            if (left_function.cost != right_function.cost)
-                return left_function.cost < right_function.cost;
-            break;
-        case FunctionModel::CallsColumn:
-            if (left_function.calls != right_function.calls)
-                return left_function.calls < right_function.calls;
             break;
         case FunctionModel::FrameColumn:
             if (left_function.stackframe != right_function.stackframe)
@@ -480,8 +422,9 @@ FunctionsWidget::FunctionsWidget(MainWindow *main, QAction *action) :
 
     // Radare core found in:
     this->main = main;
+    setTooltipStylesheet();
+    connect(Config(), SIGNAL(colorsUpdated()), this, SLOT(setTooltipStylesheet()));
 
-    setStyleSheet(QString("QToolTip { max-width: %1px; opacity: 230; }").arg(kMaxTooltipWidth));
 
     // leave the filter visible by default so users know it exists
     //ui->filterLineEdit->setVisible(false);
@@ -567,6 +510,11 @@ void FunctionsWidget::refreshTree()
     Core()->getAsyncTaskManager()->start(task);
 }
 
+void FunctionsWidget::changeSizePolicy(QSizePolicy::Policy hor, QSizePolicy::Policy ver)
+{
+    ui->dockWidgetContents->setSizePolicy(hor, ver);
+}
+
 void FunctionsWidget::onFunctionsDoubleClicked(const QModelIndex &index)
 {
     if (!index.isValid())
@@ -600,11 +548,11 @@ void FunctionsWidget::on_actionDisasAdd_comment_triggered()
                                        FunctionModel::FunctionDescriptionRole).value<FunctionDescription>();
 
     // Create dialog
-    CommentsDialog *c = new CommentsDialog(this);
+    CommentsDialog c(this);
 
-    if (c->exec()) {
+    if (c.exec()) {
         // Get new function name
-        QString comment = c->getComment();
+        QString comment = c.getComment();
         // Rename function in r2 core
         Core()->setComment(function.offset, comment);
         // Seek to new renamed function
@@ -620,14 +568,14 @@ void FunctionsWidget::on_actionFunctionsRename_triggered()
                                        FunctionModel::FunctionDescriptionRole).value<FunctionDescription>();
 
     // Create dialog
-    RenameDialog *r = new RenameDialog(this);
+    RenameDialog r(this);
 
     // Set function name in dialog
-    r->setName(function.name);
+    r.setName(function.name);
     // If user accepted
-    if (r->exec()) {
+    if (r.exec()) {
         // Get new function name
-        QString new_name = r->getName();
+        QString new_name = r.getName();
 
         // Rename function in r2 core
         Core()->renameFunction(function.name, new_name);
@@ -649,9 +597,9 @@ void FunctionsWidget::on_action_References_triggered()
     // Get selected item in functions tree view
     FunctionDescription function = ui->functionsTreeView->selectionModel()->currentIndex().data(
                                        FunctionModel::FunctionDescriptionRole).value<FunctionDescription>();
-    XrefsDialog *x = new XrefsDialog(this);
-    x->fillRefsForAddress(function.offset, function.name, true);
-    x->exec();
+    XrefsDialog x(nullptr);
+    x.fillRefsForAddress(function.offset, function.name, true);
+    x.exec();
 }
 
 void FunctionsWidget::showTitleContextMenu(const QPoint &pt)
@@ -705,4 +653,17 @@ void FunctionsWidget::resizeEvent(QResizeEvent *event)
 void FunctionsWidget::setScrollMode()
 {
     qhelpers::setVerticalScrollMode(ui->functionsTreeView);
+}
+
+/**
+ * @brief a SLOT to set the stylesheet for a tooltip
+ */ 
+void FunctionsWidget::setTooltipStylesheet()
+{
+    setStyleSheet(QString("QToolTip { border-width: 1px; max-width: %1px;" \
+                          "opacity: 230; background-color: %2;" \
+                          "color: %3; border-color: %3;}")
+                  .arg(kMaxTooltipWidth)
+                  .arg(Config()->getColor("gui.tooltip.background").name())
+                  .arg(Config()->getColor("gui.tooltip.foreground").name()));
 }

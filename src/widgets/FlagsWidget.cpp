@@ -1,12 +1,14 @@
-#include <QTreeWidget>
-#include <QComboBox>
-#include <QMenu>
-
 #include "FlagsWidget.h"
 #include "ui_FlagsWidget.h"
 #include "core/MainWindow.h"
 #include "dialogs/RenameDialog.h"
+#include "dialogs/XrefsDialog.h"
 #include "common/Helpers.h"
+
+#include <QComboBox>
+#include <QMenu>
+#include <QShortcut>
+#include <QTreeWidget>
 
 FlagsModel::FlagsModel(QList<FlagDescription> *flags, QObject *parent)
     : QAbstractListModel(parent),
@@ -148,7 +150,12 @@ FlagsWidget::FlagsWidget(MainWindow *main, QAction *action) :
     connect(ui->filterLineEdit, &QLineEdit::textChanged, this, [this] {
         tree->showItemsNumber(flags_proxy_model->rowCount());
     });
-        
+
+    auto xRefShortcut = new QShortcut(QKeySequence{Qt::CTRL + Qt::Key_X}, this);
+    xRefShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    ui->actionXrefs->setShortcut(Qt::CTRL + Qt::Key_X);
+    connect(xRefShortcut, SIGNAL(activated()), this, SLOT(on_actionXrefs_triggered()));
+    
     setScrollMode();
 
     ui->flagsTreeView->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -182,10 +189,10 @@ void FlagsWidget::on_actionRename_triggered()
     FlagDescription flag = ui->flagsTreeView->selectionModel()->currentIndex().data(
                                FlagsModel::FlagDescriptionRole).value<FlagDescription>();
 
-    RenameDialog *r = new RenameDialog(this);
-    r->setName(flag.name);
-    if (r->exec()) {
-        QString new_name = r->getName();
+    RenameDialog r(this);
+    r.setName(flag.name);
+    if (r.exec()) {
+        QString new_name = r.getName();
         Core()->renameFlag(flag.name, new_name);
     }
 }
@@ -197,11 +204,23 @@ void FlagsWidget::on_actionDelete_triggered()
     Core()->delFlag(flag.name);
 }
 
+void FlagsWidget::on_actionXrefs_triggered()
+{
+    FlagDescription flag = ui->flagsTreeView->selectionModel()->currentIndex().data(
+                               FlagsModel::FlagDescriptionRole).value<FlagDescription>();
+
+    XrefsDialog xresfDialog(nullptr);
+    xresfDialog.fillRefsForAddress(flag.offset, RAddressString(flag.offset), false);
+    xresfDialog.exec();
+}
+
 void FlagsWidget::showContextMenu(const QPoint &pt)
 {
     QMenu *menu = new QMenu(ui->flagsTreeView);
     menu->addAction(ui->actionRename);
     menu->addAction(ui->actionDelete);
+    menu->addSeparator();
+    menu->addAction(ui->actionXrefs);
     menu->exec(ui->flagsTreeView->mapToGlobal(pt));
     delete menu;
 }

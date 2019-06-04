@@ -5,6 +5,7 @@
 #include <QShortcut>
 #include <QStringListModel>
 #include <QTimer>
+#include <QSettings>
 #include <iostream>
 #include "core/Cutter.h"
 #include "ConsoleWidget.h"
@@ -13,65 +14,19 @@
 #include "common/SvgIconEngine.h"
 
 
-// TODO: Find a way to get to this without copying it here
-// source: libr/core/core.c:585..
-// remark: u.* is missing
-static const QStringList radareArgs( {
-    "?", "?v", "whereis", "which", "ls", "rm", "mkdir", "pwd", "cat", "less",
-    "dH", "ds", "dso", "dsl", "dc", "dd", "dm", "db ", "db-",
-    "dp", "dr", "dcu", "dmd", "dmp", "dml",
-    "ec", "ecs", "eco",
-    "S", "S.", "S*", "S-", "S=", "Sa", "Sa-", "Sd", "Sl", "SSj", "Sr",
-    "s", "s+", "s++", "s-", "s--", "s*", "sa", "sb", "sr",
-    "!", "!!",
-    "#sha1", "#crc32", "#pcprint", "#sha256", "#sha512", "#md4", "#md5",
-    "#!python", "#!perl", "#!vala",
-    "V", "v",
-    "aa", "ab", "af", "ar", "ag", "at", "a?", "ax", "ad",
-    "ae", "aec", "aex", "aep", "aea", "aeA", "aes", "aeso", "aesu", "aesue", "aer", "aei", "aeim", "aef",
-    "aaa", "aac", "aae", "aai", "aar", "aan", "aas", "aat", "aap", "aav",
-    "af", "afa", "afan", "afc", "afC", "afi", "afb", "afbb", "afn", "afr", "afs", "af*", "afv", "afvn",
-    "aga", "agc", "agd", "agl", "agfl",
-    // see forbbidenArgs
-    //"e", "et", "e-", "e*", "e!", "e?", "env ",
-    "i", "ii", "iI", "is", "iS", "iz",
-    "q", "q!",
-    "f", "fl", "fr", "f-", "f*", "fs", "fS", "fr", "fo", "f?",
-    "m", "m*", "ml", "m-", "my", "mg", "md", "mp", "m?",
-    "o", "o+", "oc", "on", "op", "o-", "x", "wf", "wF", "wta", "wtf", "wp",
-    "t", "to", "t-", "tf", "td", "td-", "tb", "tn", "te", "tl", "tk", "ts", "tu",
-    "(", "(*", "(-", "()", ".", ".!", ".(", "./",
-    "r", "r+", "r-",
-    "b", "bf", "b?",
-    "/", "//", "/a", "/c", "/h", "/m", "/x", "/v", "/v2", "/v4", "/v8", "/r", "/re",
-    "y", "yy", "y?",
-    "wx", "ww", "w?", "wxf",
-    "p6d", "p6e", "p8", "pb", "pc",
-    "pd", "pda", "pdb", "pdc", "pdj", "pdr", "pdf", "pdi", "pdl", "pds", "pdt",
-    "pD", "px", "pX", "po", "pf", "pf.", "pf*", "pf*.", "pfd", "pfd.", "pv", "p=", "p-",
-    "pfj", "pfj.", "pfv", "pfv.",
-    "pm", "pr", "pt", "ptd", "ptn", "pt?", "ps", "pz", "pu", "pU", "p?",
-    "z", "z*", "zj", "z-", "z-*",
-    "za", "zaf", "zaF",
-    "zo", "zoz", "zos",
-    "zfd", "zfs", "zfz",
-    "z/", "z/*",
-    "zc",
-    "zs", "zs+", "zs-", "zs-*", "zsr",
-    "#!pipe"
-});
-
-
 static const int invalidHistoryPos = -1;
 
-
+static const char *consoleWrapSettingsKey = "console.wrap";
 
 ConsoleWidget::ConsoleWidget(MainWindow *main, QAction *action) :
     CutterDockWidget(main, action),
     ui(new Ui::ConsoleWidget),
     debugOutputEnabled(true),
     maxHistoryEntries(100),
-    lastHistoryPosition(invalidHistoryPos)
+    lastHistoryPosition(invalidHistoryPos),
+    completer(nullptr),
+    historyUpShortcut(nullptr),
+    historyDownShortcut(nullptr)
 {
     ui->setupUi(this);
 
@@ -88,13 +43,24 @@ ConsoleWidget::ConsoleWidget(MainWindow *main, QAction *action) :
     connect(actionClear, SIGNAL(triggered(bool)), ui->outputTextEdit, SLOT(clear()));
     actions.append(actionClear);
 
+    actionWrapLines = new QAction(tr("Wrap Lines"), ui->outputTextEdit);
+    actionWrapLines->setCheckable(true);
+    setWrap(QSettings().value(consoleWrapSettingsKey, true).toBool());
+    connect(actionWrapLines, &QAction::triggered, this, [this] (bool checked) {
+        setWrap(checked);
+    });
+    actions.append(actionWrapLines);
+
     // Completion
-    QCompleter *completer = new QCompleter(radareArgs, this);
+    completionActive = false;
+    completer = new QCompleter(&completionModel, this);
     completer->setMaxVisibleItems(20);
     completer->setCaseSensitivity(Qt::CaseInsensitive);
     completer->setFilterMode(Qt::MatchStartsWith);
-
     ui->inputLineEdit->setCompleter(completer);
+
+    connect(ui->inputLineEdit, &QLineEdit::textEdited, this, &ConsoleWidget::updateCompletion);
+    updateCompletion();
 
     // Set console output context menu
     ui->outputTextEdit->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -107,18 +73,45 @@ ConsoleWidget::ConsoleWidget(MainWindow *main, QAction *action) :
     clear_shortcut->setContext(Qt::WidgetShortcut);
 
     // Up and down arrows show history
-    QShortcut *historyOnUp = new QShortcut(QKeySequence(Qt::Key_Up), ui->inputLineEdit);
-    connect(historyOnUp, SIGNAL(activated()), this, SLOT(historyPrev()));
-    historyOnUp->setContext(Qt::WidgetShortcut);
+    historyUpShortcut = new QShortcut(QKeySequence(Qt::Key_Up), ui->inputLineEdit);
+    connect(historyUpShortcut, SIGNAL(activated()), this, SLOT(historyPrev()));
+    historyUpShortcut->setContext(Qt::WidgetShortcut);
 
-    QShortcut *historyOnDown = new QShortcut(QKeySequence(Qt::Key_Down), ui->inputLineEdit);
-    connect(historyOnDown, SIGNAL(activated()), this, SLOT(historyNext()));
-    historyOnDown->setContext(Qt::WidgetShortcut);
+    historyDownShortcut = new QShortcut(QKeySequence(Qt::Key_Down), ui->inputLineEdit);
+    connect(historyDownShortcut, SIGNAL(activated()), this, SLOT(historyNext()));
+    historyDownShortcut->setContext(Qt::WidgetShortcut);
 
-    connect(Config(), SIGNAL(fontsUpdated()), this, SLOT(setupFont()));
+    QShortcut *completionShortcut = new QShortcut(QKeySequence(Qt::Key_Tab), ui->inputLineEdit);
+    connect(completionShortcut, &QShortcut::activated, this, &ConsoleWidget::triggerCompletion);
+
+    connect(ui->inputLineEdit, &QLineEdit::editingFinished, this, &ConsoleWidget::disableCompletion);
+
+    connect(Config(), &Configuration::fontsUpdated, this, &ConsoleWidget::setupFont);
+    connect(Config(), &Configuration::interfaceThemeChanged, this, &ConsoleWidget::setupFont);
+
+    completer->popup()->installEventFilter(this);
 }
 
-ConsoleWidget::~ConsoleWidget() {}
+ConsoleWidget::~ConsoleWidget()
+{
+    delete completer;
+}
+
+bool ConsoleWidget::eventFilter(QObject *obj, QEvent *event)
+{
+    if(completer && obj == completer->popup() &&
+        // disable up/down shortcuts if completer is shown
+        (event->type() == QEvent::Type::Show || event->type() == QEvent::Type::Hide)) {
+        bool enabled = !completer->popup()->isVisible();
+        if (historyUpShortcut) {
+            historyUpShortcut->setEnabled(enabled);
+        }
+        if (historyDownShortcut) {
+            historyDownShortcut->setEnabled(enabled);
+        }
+    }
+    return false;
+}
 
 void ConsoleWidget::setupFont()
 {
@@ -196,6 +189,13 @@ void ConsoleWidget::executeCommand(const QString &command)
     Core()->getAsyncTaskManager()->start(commandTask);
 }
 
+void ConsoleWidget::setWrap(bool wrap)
+{
+    QSettings().setValue(consoleWrapSettingsKey, wrap);
+    actionWrapLines->setChecked(wrap);
+    ui->outputTextEdit->setLineWrapMode(wrap ? QPlainTextEdit::WidgetWidth: QPlainTextEdit::NoWrap);
+}
+
 void ConsoleWidget::on_inputLineEdit_returnPressed()
 {
     QString input = ui->inputLineEdit->text();
@@ -213,6 +213,8 @@ void ConsoleWidget::on_execButton_clicked()
 
 void ConsoleWidget::showCustomContextMenu(const QPoint &pt)
 {
+    actionWrapLines->setChecked(ui->outputTextEdit->lineWrapMode() == QPlainTextEdit::WidgetWidth);
+
     QMenu *menu = new QMenu(ui->outputTextEdit);
     menu->addActions(actions);
     menu->exec(ui->outputTextEdit->mapToGlobal(pt));
@@ -251,8 +253,48 @@ void ConsoleWidget::historyPrev()
     }
 }
 
+void ConsoleWidget::triggerCompletion()
+{
+    if (completionActive) {
+        return;
+    }
+    completionActive = true;
+    updateCompletion();
+    completer->complete();
+}
+
+void ConsoleWidget::disableCompletion()
+{
+    if (!completionActive) {
+        return;
+    }
+    completionActive = false;
+    updateCompletion();
+    completer->popup()->hide();
+}
+
+void ConsoleWidget::updateCompletion()
+{
+    if (!completionActive) {
+        completionModel.setStringList({});
+        return;
+    }
+
+    auto current = ui->inputLineEdit->text();
+    auto completions = Core()->autocomplete(current, R_LINE_PROMPT_DEFAULT);
+    int lastSpace = current.lastIndexOf(' ');
+    if (lastSpace >= 0) {
+        current = current.left(lastSpace + 1);
+        for (auto &s : completions) {
+            s = current + s;
+        }
+    }
+    completionModel.setStringList(completions);
+}
+
 void ConsoleWidget::clear()
 {
+    disableCompletion();
     ui->inputLineEdit->clear();
 
     invalidateHistoryPosition();

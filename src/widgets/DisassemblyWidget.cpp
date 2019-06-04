@@ -1,7 +1,5 @@
 #include "DisassemblyWidget.h"
 #include "menus/DisassemblyContextMenu.h"
-#include "common/HexAsciiHighlighter.h"
-#include "common/HexHighlighter.h"
 #include "common/Configuration.h"
 #include "common/Helpers.h"
 #include "common/TempConfig.h"
@@ -36,14 +34,27 @@ static DisassemblyTextBlockUserData *getUserData(const QTextBlock &block)
 }
 
 DisassemblyWidget::DisassemblyWidget(MainWindow *main, QAction *action)
-    :   CutterDockWidget(main, action)
+    :   MemoryDockWidget(CutterCore::MemoryWidgetType::Disassembly, main, action)
     ,   mCtxMenu(new DisassemblyContextMenu(this))
     ,   mDisasScrollArea(new DisassemblyScrollArea(this))
     ,   mDisasTextEdit(new DisassemblyTextEdit(this))
     ,   seekable(new CutterSeekable(this))
 {
+    /*
+     * Ugly hack just for the layout issue
+     * QSettings saves the state with the object names
+     * By doing this hack,
+     * you can at least avoid some mess by dismissing all the Extra Widgets
+     */
+    QString name = "Disassembly";
+    if (!action) {
+        name = "Extra Disassembly";
+    }
+    setObjectName(name);
+
     topOffset = bottomOffset = RVA_INVALID;
     cursorLineOffset = 0;
+    cursorCharOffset = 0;
     seekFromCursor = false;
 
     setWindowTitle(tr("Disassembly"));
@@ -57,7 +68,6 @@ DisassemblyWidget::DisassemblyWidget(MainWindow *main, QAction *action)
     setWidget(mDisasScrollArea);
 
     setAllowedAreas(Qt::AllDockWidgetAreas);
-    setObjectName("DisassemblyWidget");
 
     setupFonts();
     setupColors();
@@ -89,15 +99,6 @@ DisassemblyWidget::DisassemblyWidget(MainWindow *main, QAction *action)
             this, SLOT(showDisasContextMenu(const QPoint &)));
 
 
-    // Space to switch to graph
-    QShortcut *graphShortcut = new QShortcut(QKeySequence(Qt::Key_Space), this);
-    graphShortcut->setContext(Qt::WidgetWithChildrenShortcut);
-    connect(graphShortcut, &QShortcut::activated, this, [] {
-        Core()->setMemoryWidgetPriority(CutterCore::MemoryWidgetType::Graph);
-        Core()->triggerRaisePrioritizedMemoryWidget();
-    });
-
-
     connect(mDisasScrollArea, SIGNAL(scrollLines(int)), this, SLOT(scrollInstructions(int)));
     connect(mDisasScrollArea, SIGNAL(disassemblyResized()), this, SLOT(updateMaxLines()));
 
@@ -108,8 +109,6 @@ DisassemblyWidget::DisassemblyWidget(MainWindow *main, QAction *action)
         }
     });
 
-    connect(Core(), SIGNAL(raisePrioritizedMemoryWidget(CutterCore::MemoryWidgetType)), this,
-            SLOT(raisePrioritizedMemoryWidget(CutterCore::MemoryWidgetType)));
     connect(Core(), SIGNAL(commentsChanged()), this, SLOT(refreshDisasm()));
     connect(Core(), SIGNAL(flagsChanged()), this, SLOT(refreshDisasm()));
     connect(Core(), SIGNAL(functionsChanged()), this, SLOT(refreshDisasm()));
@@ -138,13 +137,9 @@ DisassemblyWidget::DisassemblyWidget(MainWindow *main, QAction *action)
     connect(Core(), &CutterCore::refreshAll, this, [this]() {
         refreshDisasm(seekable->getOffset());
     });
+    refreshDisasm(seekable->getOffset());
 
     connect(mCtxMenu, SIGNAL(copy()), mDisasTextEdit, SLOT(copy()));
-
-    // Dirty
-    QShortcut *shortcut_escape = new QShortcut(QKeySequence(Qt::Key_Escape), this);
-    shortcut_escape->setContext(Qt::WidgetShortcut);
-    connect(shortcut_escape, SIGNAL(activated()), this, SLOT(seekPrev()));
 
     mCtxMenu->addSeparator();
     syncIt.setText(tr("Sync/unsync offset"));
@@ -152,32 +147,48 @@ DisassemblyWidget::DisassemblyWidget(MainWindow *main, QAction *action)
     connect(&syncIt, SIGNAL(triggered(bool)), this, SLOT(toggleSync()));
     connect(seekable, &CutterSeekable::seekableSeekChanged, this, &DisassemblyWidget::on_seekChanged);
 
-#define ADD_SHORTCUT(ksq, slot) { \
-    QShortcut *s = new QShortcut((ksq), this); \
-    s->setContext(Qt::WidgetShortcut); \
-    connect(s, &QShortcut::activated, this, (slot)); \
-}
-    ADD_SHORTCUT(QKeySequence(Qt::Key_J), [this]() {
+    addActions(mCtxMenu->actions());
+
+#define ADD_ACTION(ksq, ctx, slot) {\
+    QAction *a = new QAction(this); \
+    a->setShortcut(ksq); \
+    a->setShortcutContext(ctx); \
+    addAction(a); \
+    connect(a, &QAction::triggered, this, (slot)); }
+
+    // Space to switch to graph
+    ADD_ACTION(Qt::Key_Space, Qt::WidgetWithChildrenShortcut, [] {
+        Core()->setMemoryWidgetPriority(CutterCore::MemoryWidgetType::Graph);
+        Core()->triggerRaisePrioritizedMemoryWidget();
+    })
+
+    ADD_ACTION(Qt::Key_Escape, Qt::WidgetWithChildrenShortcut, &DisassemblyWidget::seekPrev)
+
+    ADD_ACTION(Qt::Key_J, Qt::WidgetWithChildrenShortcut, [this]() {
         moveCursorRelative(false, false);
     })
-    ADD_SHORTCUT(QKeySequence::MoveToNextLine, [this]() {
+    ADD_ACTION(QKeySequence::MoveToNextLine, Qt::WidgetWithChildrenShortcut, [this]() {
         moveCursorRelative(false, false);
     })
-    ADD_SHORTCUT(QKeySequence(Qt::Key_K), [this]() {
+    ADD_ACTION(Qt::Key_K, Qt::WidgetWithChildrenShortcut, [this]() {
         moveCursorRelative(true, false);
     })
-    ADD_SHORTCUT(QKeySequence::MoveToPreviousLine, [this]() {
+    ADD_ACTION(QKeySequence::MoveToPreviousLine, Qt::WidgetWithChildrenShortcut, [this]() {
         moveCursorRelative(true, false);
     })
-    ADD_SHORTCUT(QKeySequence::MoveToNextPage, [this]() {
+    ADD_ACTION(QKeySequence::MoveToNextPage, Qt::WidgetWithChildrenShortcut, [this]() {
         moveCursorRelative(false, true);
     })
-    ADD_SHORTCUT(QKeySequence::MoveToPreviousPage, [this]() {
+    ADD_ACTION(QKeySequence::MoveToPreviousPage, Qt::WidgetWithChildrenShortcut, [this]() {
         moveCursorRelative(true, true);
     })
-    ADD_SHORTCUT(QKeySequence(Qt::CTRL + Qt::Key_Plus), &DisassemblyWidget::zoomIn)
-    ADD_SHORTCUT(QKeySequence(Qt::CTRL + Qt::Key_Minus), &DisassemblyWidget::zoomOut)
-#undef ADD_SHORTCUT
+    
+    // Plus sign in num-bar considered "Qt::Key_Equal"
+    ADD_ACTION(QKeySequence(Qt::CTRL + Qt::Key_Equal), Qt::WidgetWithChildrenShortcut, &DisassemblyWidget::zoomIn)
+    // Plus sign in numpad
+    ADD_ACTION(QKeySequence(Qt::CTRL + Qt::Key_Plus), Qt::WidgetWithChildrenShortcut, &DisassemblyWidget::zoomIn)
+    ADD_ACTION(QKeySequence(Qt::CTRL + Qt::Key_Minus), Qt::WidgetWithChildrenShortcut, &DisassemblyWidget::zoomOut)
+#undef ADD_ACTION
 }
 
 void DisassemblyWidget::toggleSync()
@@ -188,6 +199,26 @@ void DisassemblyWidget::toggleSync()
         setWindowTitle(windowTitle);
     } else {
         setWindowTitle(windowTitle + CutterSeekable::tr(" (unsynced)"));
+    }
+}
+
+void DisassemblyWidget::setPreviewMode(bool previewMode)
+{
+    mDisasTextEdit->setContextMenuPolicy(previewMode
+                                         ? Qt::NoContextMenu
+                                         : Qt::CustomContextMenu);
+    mCtxMenu->setEnabled(!previewMode);
+    for (auto action : mCtxMenu->actions()) {
+        action->setEnabled(!previewMode);
+    }
+    for (auto action : actions()) {
+        if (action->shortcut() == Qt::Key_Space ||
+            action->shortcut() == Qt::Key_Escape) {
+            action->setEnabled(!previewMode);
+        }
+    }
+    if (seekable->isSynchronized() && previewMode) {
+        toggleSync();
     }
 }
 
@@ -327,19 +358,14 @@ void DisassemblyWidget::highlightCurrentLine()
 {
     QList<QTextEdit::ExtraSelection> extraSelections;
 
-    QColor highlightColor = ConfigColor("highlight");
+    QColor highlightColor = ConfigColor("lineHighlight");
     QColor highlightPCColor = ConfigColor("highlightPC");
-    QColor highlightWordColor = ConfigColor("highlightWord");
 
     // Highlight the current word
     QTextCursor cursor = mDisasTextEdit->textCursor();
     cursor.select(QTextCursor::WordUnderCursor);
     QString searchString = cursor.selectedText();
-
-    cursor.movePosition(QTextCursor::StartOfLine);
-    int listStartPos = cursor.position();
-    cursor.movePosition(QTextCursor::EndOfLine);
-    int lineEndPos = cursor.position();
+    curHighlightedWord = searchString;
 
     // Highlight the current line
     QTextEdit::ExtraSelection highlightSelection;
@@ -364,26 +390,7 @@ void DisassemblyWidget::highlightCurrentLine()
     }
 
     // Highlight all the words in the document same as the current one
-    QTextDocument *document = mDisasTextEdit->document();
-
-    highlightSelection.cursor = cursor;
-    highlightSelection.cursor.movePosition(QTextCursor::Start, QTextCursor::MoveAnchor);
-
-    while (!highlightSelection.cursor.isNull() && !highlightSelection.cursor.atEnd()) {
-        highlightSelection.cursor = document->find(searchString, highlightSelection.cursor,
-                                                   QTextDocument::FindWholeWords);
-
-        if (!highlightSelection.cursor.isNull()) {
-            if (highlightSelection.cursor.position() >= listStartPos
-                    && highlightSelection.cursor.position() <= lineEndPos) {
-                highlightSelection.format.setBackground(highlightWordColor);
-            } else {
-                highlightSelection.format.setBackground(highlightWordColor);
-            }
-
-            extraSelections.append(highlightSelection);
-        }
-    }
+    extraSelections.append(getSameWordsSelections());
 
     // highlight PC line
     RVA PCAddr = Core()->getProgramCounterValue();
@@ -447,7 +454,7 @@ void DisassemblyWidget::updateCursorPosition()
 
     if (offset < topOffset || (offset > bottomOffset && bottomOffset != RVA_INVALID)) {
         mDisasTextEdit->moveCursor(QTextCursor::Start);
-        mDisasTextEdit->setExtraSelections({});
+        mDisasTextEdit->setExtraSelections(getSameWordsSelections());
     } else {
         RVA currentCursorOffset = readCurrentDisassemblyOffset();
         QTextCursor originalCursor = mDisasTextEdit->textCursor();
@@ -460,6 +467,10 @@ void DisassemblyWidget::updateCursorPosition()
             if (lineOffset == offset) {
                 if (cursorLineOffset > 0) {
                     cursor.movePosition(QTextCursor::Down, QTextCursor::MoveAnchor, cursorLineOffset);
+                }
+                if (cursorCharOffset > 0) {
+                    cursor.movePosition(QTextCursor::StartOfLine);
+                    cursor.movePosition(QTextCursor::Right, QTextCursor::MoveAnchor, cursorCharOffset);
                 }
 
                 mDisasTextEdit->setTextCursor(cursor);
@@ -504,6 +515,7 @@ void DisassemblyWidget::cursorPositionChanged()
 
     cursorLineOffset = 0;
     QTextCursor c = mDisasTextEdit->textCursor();
+    cursorCharOffset = c.positionInBlock();
     while (c.blockNumber() > 0) {
         c.movePosition(QTextCursor::PreviousBlock);
         if (readDisassemblyOffset(c) != offset) {
@@ -517,6 +529,13 @@ void DisassemblyWidget::cursorPositionChanged()
     seekFromCursor = false;
     highlightCurrentLine();
     mCtxMenu->setCanCopy(mDisasTextEdit->textCursor().hasSelection());
+    if (mDisasTextEdit->textCursor().hasSelection()) {
+        // A word is selected so use it
+        mCtxMenu->setCurHighlightedWord(mDisasTextEdit->textCursor().selectedText());
+    } else {
+        // No word is selected so use the word under the cursor
+        mCtxMenu->setCurHighlightedWord(curHighlightedWord);
+    }
 }
 
 void DisassemblyWidget::moveCursorRelative(bool up, bool page)
@@ -580,6 +599,33 @@ void DisassemblyWidget::moveCursorRelative(bool up, bool page)
     }
 }
 
+QList<QTextEdit::ExtraSelection> DisassemblyWidget::getSameWordsSelections()
+{
+    QList<QTextEdit::ExtraSelection> selections;
+    QTextEdit::ExtraSelection highlightSelection;
+    QTextDocument *document = mDisasTextEdit->document();
+    QColor highlightWordColor = ConfigColor("wordHighlight");
+
+    if (curHighlightedWord.isNull()) {
+        return QList<QTextEdit::ExtraSelection>();
+    }
+
+    highlightSelection.cursor = mDisasTextEdit->textCursor();
+    highlightSelection.cursor.movePosition(QTextCursor::Start, QTextCursor::MoveAnchor);
+
+    while (!highlightSelection.cursor.isNull() && !highlightSelection.cursor.atEnd()) {
+        highlightSelection.cursor = document->find(curHighlightedWord, highlightSelection.cursor,
+                                                   QTextDocument::FindWholeWords);
+
+        if (!highlightSelection.cursor.isNull()) {
+            highlightSelection.format.setBackground(highlightWordColor);
+
+            selections.append(highlightSelection);
+        }
+    }
+    return selections;
+}
+
 bool DisassemblyWidget::eventFilter(QObject *obj, QEvent *event)
 {
     if (event->type() == QEvent::MouseButtonDblClick
@@ -613,6 +659,7 @@ void DisassemblyWidget::on_seekChanged(RVA offset)
 {
     if (!seekFromCursor) {
         cursorLineOffset = 0;
+        cursorCharOffset = 0;
     }
 
     if (topOffset != RVA_INVALID
@@ -624,15 +671,6 @@ void DisassemblyWidget::on_seekChanged(RVA offset)
         refreshDisasm(offset);
     }
     mCtxMenu->setOffset(offset);
-}
-
-void DisassemblyWidget::raisePrioritizedMemoryWidget(CutterCore::MemoryWidgetType type)
-{
-    bool emptyGraph = (type == CutterCore::MemoryWidgetType::Graph && Core()->isGraphEmpty());
-    if (type == CutterCore::MemoryWidgetType::Disassembly || emptyGraph) {
-        raise();
-        setFocus();
-    }
 }
 
 void DisassemblyWidget::fontsUpdatedSlot()

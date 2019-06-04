@@ -1,15 +1,20 @@
 #ifndef CONSOLEWIDGET_H
 #define CONSOLEWIDGET_H
 
-#include <memory>
 #include "core/MainWindow.h"
 #include "CutterDockWidget.h"
 #include "common/CommandTask.h"
 
+#include <QStringListModel>
+
+#include <memory>
+
+class QCompleter;
+class QShortcut;
+
 namespace Ui {
 class ConsoleWidget;
 }
-
 
 class ConsoleWidget : public CutterDockWidget
 {
@@ -30,6 +35,9 @@ public:
         maxHistoryEntries = max;
     }
 
+protected:
+    bool eventFilter(QObject *obj, QEvent *event);
+
 public slots:
     void focusInputLineEdit();
 
@@ -48,6 +56,10 @@ private slots:
     void historyNext();
     void historyPrev();
 
+    void triggerCompletion();
+    void disableCompletion();
+    void updateCompletion();
+
     void clear();
 
 private:
@@ -56,15 +68,22 @@ private:
     void invalidateHistoryPosition();
     void removeLastLine();
     void executeCommand(const QString &command);
+    void setWrap(bool wrap);
 
     QSharedPointer<CommandTask> commandTask;
 
     std::unique_ptr<Ui::ConsoleWidget> ui;
+    QAction *actionWrapLines;
     QList<QAction *> actions;
     bool debugOutputEnabled;
     int maxHistoryEntries;
     int lastHistoryPosition;
     QStringList history;
+    bool completionActive;
+    QStringListModel completionModel;
+    QCompleter *completer;
+    QShortcut *historyUpShortcut;
+    QShortcut *historyDownShortcut;
 };
 
 #endif // CONSOLEWIDGET_H
